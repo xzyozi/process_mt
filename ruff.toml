@@ -1,0 +1,27 @@
+# ruff.toml
+line-length = 120
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    "alembic",
+    "etc",
+    "old",
+    "venv",
+    ".venv",
+    "tests" # Exclude tests folder from linting for now, as it might have specific test patterns
+]
+
+[lint]
+select = ["E", "F", "W", "I"] # Error, Flake8, Warnings, Isort
+ignore = []
+per-file-ignores = {
+    "app/tool/__init__.py" = ["F401"],
+    "run.py" = ["E402"],
+    "tool/model_manager_gui.py" = ["E402"]
+}
+
+[lint.isort]
+known-first-party = ["app"]
+force-sort-within-sections = true
