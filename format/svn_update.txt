@@ -1,0 +1,37 @@
+@echo off
+setlocal
+
+rem ==============================
+rem 設定エリア
+rem ==============================
+
+rem 1. 更新したいフォルダのパス（絶対パスで指定）
+set TARGET_DIR="C:\Work\MyProject"
+
+rem 2. svn.exe の場所（環境変数PATHが通っていない場合のみ指定）
+rem 通常は svn だけで動きますが、動かない場合はフルパスを書きます
+set SVN_CMD=svn
+
+rem ==============================
+rem 実行処理
+rem ==============================
+
+echo --- Start Update: %TARGET_DIR% ---
+
+rem 方法A: 引数でパスを渡す（推奨）
+rem カレントディレクトリを移動せずに実行できます
+%SVN_CMD% update %TARGET_DIR%
+
+rem エラー判定（成功なら0、失敗なら1以上）
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Update failed.
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo --- Update Complete ---
+
+rem 自動で閉じたくない場合は次の行の rem を外してください
+rem pause
+
+endlocal
