@@ -1,6 +1,5 @@
 /bk
 /csv_info.txt
-/info.txt
 /ment.bat
 /process_schedule.csv
 /PyTaskScheduler.bat
@@ -9,4 +8,3 @@
 /scheduler.py
 /task_log.log
 /task_log.txt
-/tool
