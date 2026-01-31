@@ -210,7 +210,7 @@ class TaskRunner:
             cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", full_path_str]
         elif suffix == '.py':
             cmd = [sys.executable, full_path_str]
-        elif suffix in ['.bat', '.cmd']:
+        elif suffix in ['.bat', '.cmd', '.lnk']:
             cmd = ["cmd.exe", "/c", full_path_str]
         else:
             cmd = [full_path_str]
