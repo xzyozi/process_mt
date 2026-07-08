@@ -15,10 +15,10 @@ from concurrent.futures import ThreadPoolExecutor
 BASE_DIR = pathlib.Path(__file__).parent.absolute()
 CSV_PATH = BASE_DIR / "process_schedule.csv"
 LOG_PATH = BASE_DIR / "task_log.log"
-LOCK_PORT = 62000
+LOCK_PORT = 62001
 CHECK_INTERVAL = 300 # miniute
 APP_NAME = "PyTaskScheduler"  # スタートアップ登録名
-RETRY_COOUT = 5
+RETRY_COUNT = 5
 
 # --- ロギング設定 ---
 logging.basicConfig(
@@ -117,7 +117,7 @@ class StartupManager:
                 logger.warning("activate.bat not found. Using global python environment.")
 
             # start "" "path_to_pythonw" "path_to_script"
-            content.append(f'start "" "{python_exe}" "{self.script_path}"')
+            content.append(f'start "" "{python_exe}"  "{self.script_path}"')
 
             with open(self.bat_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(content))
@@ -186,14 +186,49 @@ class TaskValidatorBase:
             return True, "First Run"
 
         try:
-            last_run = datetime.datetime.strptime(last_run_str, "%Y-%m-%d %H:%M:%S")
+            last_run = self._parse_last_run_time(last_run_str)
+            if last_run is None:
+                return True, "Invalid Date Reset"
+            
             next_run = last_run + datetime.timedelta(minutes=freq_min)
             if current_time >= next_run:
                 return True, "Scheduled"
             else:
                 return False, f"Next run: {next_run}"
-        except ValueError:
+        except Exception as e:
+            logger.warning(f"Date parsing error: {e}")
             return True, "Invalid Date Reset"
+
+    def _parse_last_run_time(self, time_str):
+        """
+        複数の日付フォーマットに対応してパース
+        
+        対応フォーマット:
+        - YYYY-MM-DD HH:MM:SS (ISO形式)
+        - YYYY/M/D HH:MM (スラッシュ区切り、秒なし)
+        - YYYY-MM-DD HH:MM (ハイフン区切り、秒なし)
+        
+        Args:
+            time_str (str): 日付文字列
+        
+        Returns:
+            datetime.datetime or None: パース成功時はdatetimeオブジェクト、失敗時はNone
+        """
+        formats = [
+            "%Y-%m-%d %H:%M:%S",  # 2026-06-22 08:57:09
+            "%Y/%m/%d %H:%M",     # 2026/1/29 11:47
+            "%Y-%m-%d %H:%M",     # 2026-06-22 08:57
+            "%Y/%m/%d %H:%M:%S",  # 2026/1/29 11:47:00
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(time_str.strip(), fmt)
+            except ValueError:
+                continue
+        
+        logger.warning(f"Unsupported date format: '{time_str}'. Supported formats: {formats}")
+        return None
 
 class TaskRunner:
     """実行ロジッククラス"""
@@ -210,7 +245,7 @@ class TaskRunner:
             cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", full_path_str]
         elif suffix == '.py':
             cmd = [sys.executable, full_path_str]
-        elif suffix in ['.bat', '.cmd', '.lnk']:
+        elif suffix in ['.bat', '.cmd']:
             cmd = ["cmd.exe", "/c", full_path_str]
         else:
             cmd = [full_path_str]
@@ -327,16 +362,16 @@ class Scheduler(TaskValidatorBase):
                 writer.writerows(rows)
             
             # Retry logic for file locking issues (WinError 5)
-            for attempt in range(RETRY_COOUT):
+            for attempt in range(RETRY_COUNT):
                 try:
                     os.replace(temp_path, CSV_PATH)
                     logger.info("CSV Schedule updated.")
                     break
                 except OSError as e:
                     # WinError 5 (Access Denied) or 32 (Sharing Violation) など
-                    if attempt < RETRY_COOUT - 1:
+                    if attempt < RETRY_COUNT - 1:
                         wait_time = 1 + (attempt * 0.5)
-                        logger.warning(f"CSV update failed (Attempt {attempt+1}/{RETRY_COOUT}). Retrying in {wait_time}s. Error: {e}")
+                        logger.warning(f"CSV update failed (Attempt {attempt+1}/{RETRY_COUNT}). Retrying in {wait_time}s. Error: {e}")
                         time.sleep(wait_time)
                     else:
                         raise
