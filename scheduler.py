@@ -1,3 +1,46 @@
+"""
+Python Task Scheduler - 定期タスク自動実行ツール
+
+CSVファイルに定義されたタスクを定期的に監視・実行するスケジューラです。
+多重起動防止、並列実行、リトライ機構などの堅牢性を備えています。
+
+主な機能:
+    - CSVベースのタスク定義管理
+    - ThreadPoolExecutorによる並列実行
+    - ソケット通信による多重起動防止
+    - Windowsスタートアップへの自動登録
+    - 複数の日付フォーマット対応
+    - CSV書き込みリトライ機構
+
+使用方法:
+    # 通常起動（常駐）
+    python scheduler.py
+    
+    # 1回だけ実行
+    python scheduler.py --once
+    
+    # スタートアップに登録
+    python scheduler.py --install
+    
+    # スタートアップから削除
+    python scheduler.py --uninstall
+
+設定:
+    - CSV_PATH: タスク定義ファイル (process_schedule.csv)
+    - LOG_PATH: ログファイル (task_log.log)
+    - CHECK_INTERVAL: 監視間隔（秒）
+    - LOCK_PORT: 多重起動防止用ポート番号
+
+対応スクリプト形式:
+    - .py: Python
+    - .ps1: PowerShell
+    - .bat/.cmd: Batch
+    - .exe: 実行ファイル
+
+Author: mm25356
+Version: 2026/01/23
+Environment: Python 3.11.9+
+"""
 import csv
 import sys
 import os
@@ -32,13 +75,45 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class SingleInstanceLock:
-    """多重起動防止クラス"""
+    """
+    多重起動防止クラス
+    
+    ソケット通信を利用して、スクリプトの同時実行を防止します。
+    指定されたポートをバインドすることでロックを取得し、
+    既に起動中の場合は新しいプロセスを終了させます。
+    
+    Attributes:
+        port (int): ロック用のポート番号
+        socket (socket.socket): TCPソケットオブジェクト
+        _locked (bool): ロック取得状態
+    
+    Usage:
+        with SingleInstanceLock():
+            # 多重起動が防止された状態で実行
+            main_process()
+    """
     def __init__(self, port=LOCK_PORT):
+        """
+        Args:
+            port (int): ロック用のポート番号（デフォルト: LOCK_PORT）
+        """
         self.port = port
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._locked = False
 
     def __enter__(self):
+        """
+        コンテキストマネージャのエントリポイント
+        
+        指定されたポートへのバインドを試み、ロックを取得します。
+        バインド失敗時（既に起動中）はプロセスを終了します。
+        
+        Returns:
+            SingleInstanceLock: 自身のインスタンス
+        
+        Raises:
+            SystemExit: 既に起動中の場合
+        """
         try:
             self.socket.bind(("127.0.0.1", self.port))
             self._locked = True
@@ -50,15 +125,43 @@ class SingleInstanceLock:
             sys.exit(0)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        コンテキストマネージャの終了処理
+        
+        ロックが取得されている場合、ソケットをクローズします。
+        
+        Args:
+            exc_type: 例外の型
+            exc_val: 例外の値
+            exc_tb: トレースバック
+        """
         if self._locked:
             self.socket.close()
 
 class StartupManager:
     """
-    Windowsのスタートアップ登録（バッチファイル作成）を管理するクラス
-    仮想環境(venv)のactivate.batを自動探索するロジックを含む
+    Windowsスタートアップ登録管理クラス
+    
+    スクリプトをWindowsのスタートアップに登録・削除するための
+    バッチファイルを作成・管理します。仮想環境(venv)のactivate.batを
+    自動探索し、適切な起動スクリプトを生成します。
+    
+    Attributes:
+        app_name (str): アプリケーション名
+        script_path (Path): スクリプトの絶対パス
+        project_root (Path): プロジェクトルートディレクトリ
+        startup_folder (Path): Windowsスタートアップフォルダのパス
+        bat_path (Path): 生成されるバッチファイルのパス
+    
+    Note:
+        Windows以外のプラットフォームでは機能しません。
     """
     def __init__(self, app_name=APP_NAME, script_path=None):
+        """
+        Args:
+            app_name (str): アプリケーション名（デフォルト: APP_NAME）
+            script_path (Path, optional): スクリプトパス（デフォルト: 現在のファイル）
+        """
         self.app_name = app_name
         self.script_path = script_path if script_path else pathlib.Path(__file__).absolute()
         self.project_root = self.script_path.parent
@@ -72,7 +175,20 @@ class StartupManager:
 
     def _find_activate_bat(self):
         """
-        現在の実行環境やプロジェクト構成から activate.bat を探索する
+        仮想環境のactivate.batを探索
+        
+        現在の実行環境やプロジェクト構成から activate.bat の位置を
+        複数の候補パスから探索します。
+        
+        探索候補:
+            - 現在のPython実行ファイルと同じディレクトリ
+            - 現在のPython実行ファイルの親/Scripts
+            - プロジェクトルート/venv/Scripts
+            - プロジェクトルート/.venv/Scripts
+            - プロジェクトルート/env/Scripts
+        
+        Returns:
+            Path or None: activate.batのパス（見つからない場合はNone）
         """
         current_python_dir = pathlib.Path(sys.executable).parent
         
@@ -91,7 +207,19 @@ class StartupManager:
         return None
 
     def install(self):
-        """スタートアップにバッチファイルを作成"""
+        """
+        スクリプトをWindowsスタートアップに登録
+        
+        仮想環境のactivate.batを自動検出し、適切な起動バッチファイルを
+        スタートアップフォルダに作成します。pythonw.exeを優先して使用し、
+        ウィンドウを表示せずにバックグラウンド実行します。
+        
+        Raises:
+            Exception: バッチファイル作成に失敗した場合
+        
+        Note:
+            Windows以外のプラットフォームではエラーログを出力して終了します。
+        """
         if sys.platform != "win32":
             logger.error("Startup registration is only supported on Windows.")
             return
@@ -130,7 +258,14 @@ class StartupManager:
             print(f"Error: {e}")
 
     def uninstall(self):
-        """スタートアップからバッチファイルを削除"""
+        """
+        スクリプトをWindowsスタートアップから削除
+        
+        スタートアップフォルダに作成されたバッチファイルを削除します。
+        
+        Note:
+            バッチファイルが存在しない場合は情報メッセージを表示します。
+        """
         if self.bat_path and self.bat_path.exists():
             try:
                 os.remove(self.bat_path)
@@ -143,22 +278,69 @@ class StartupManager:
             print("Info: Startup script does not exist.")
 
 class TaskValidatorBase:
-    """タスクデータの検証・判定を行う基底クラス"""
+    """
+    タスクデータの検証・判定を行う基底クラス
+    
+    CSVから読み込んだタスクデータの整合性チェック、ファイル存在確認、
+    実行タイミング判定などの検証ロジックを提供します。
+    
+    Attributes:
+        REQUIRED_HEADERS (set): CSV必須ヘッダー列の集合
+    """
     REQUIRED_HEADERS = {'Enabled', 'ProcessName', 'ExecutablePath', 'Frequency'}
 
     def get_absolute_path(self, exec_path):
+        """
+        実行ファイルの絶対パスを取得
+        
+        相対パスの場合はプロジェクトルート（BASE_DIR）からの
+        絶対パスに変換します。
+        
+        Args:
+            exec_path (str): 実行ファイルパス
+        
+        Returns:
+            Path: 絶対パスのPathオブジェクト
+        """
         f_path = pathlib.Path(exec_path)
         if not f_path.is_absolute():
             f_path = BASE_DIR / f_path
         return f_path
 
     def validate_csv_structure(self, fieldnames):
+        """
+        CSVファイルの構造を検証
+        
+        必須ヘッダー（Enabled, ProcessName, ExecutablePath, Frequency）が
+        すべて存在するかチェックします。
+        
+        Args:
+            fieldnames (list): CSVのヘッダー列リスト
+        
+        Returns:
+            tuple: (is_valid: bool, message: str)
+                - is_valid: 検証が成功した場合True
+                - message: エラーメッセージ（成功時は空文字列）
+        """
         if not self.REQUIRED_HEADERS.issubset(fieldnames):
             missing = self.REQUIRED_HEADERS - set(fieldnames)
             return False, f"Missing headers: {missing}"
         return True, ""
 
     def validate_row_data(self, row):
+        """
+        タスク行データの検証
+        
+        ExecutablePathの存在確認とFrequencyの数値型チェックを行います。
+        
+        Args:
+            row (dict): CSVの1行分のデータ
+        
+        Returns:
+            tuple: (is_valid: bool, message: str)
+                - is_valid: 検証が成功した場合True
+                - message: エラーメッセージ（成功時は空文字列）
+        """
         name = row.get('ProcessName', 'Unknown')
         if not row.get('ExecutablePath'):
             return False, f"[{name}] Missing ExecutablePath."
@@ -169,12 +351,41 @@ class TaskValidatorBase:
         return True, ""
 
     def check_file_existence(self, exec_path):
+        """
+        実行ファイルの存在確認
+        
+        指定されたパスのファイルが実際に存在するかチェックします。
+        相対パスの場合は絶対パスに変換してから確認します。
+        
+        Args:
+            exec_path (str): 実行ファイルパス
+        
+        Returns:
+            tuple: (exists: bool, path_or_message: str)
+                - exists: ファイルが存在する場合True
+                - path_or_message: 存在する場合は絶対パス、存在しない場合はエラーメッセージ
+        """
         f_path = self.get_absolute_path(exec_path)
         if not f_path.exists():
             return False, f"File not found: {f_path}"
         return True, str(f_path)
 
     def should_run_task(self, row, current_time):
+        """
+        タスクを実行すべきか判定
+        
+        Enabledフラグ、実行頻度、最終実行時刻から、
+        現在のタイミングでタスクを実行すべきか判定します。
+        
+        Args:
+            row (dict): タスク行データ
+            current_time (datetime): 現在時刻
+        
+        Returns:
+            tuple: (should_run: bool, reason: str)
+                - should_run: 実行すべき場合True
+                - reason: 判定理由（"First Run", "Scheduled", "Disabled", etc.）
+        """
         enabled = row.get('Enabled', '').lower() in ('true', '1', 'yes')
         if not enabled:
             return False, "Disabled"
@@ -231,9 +442,34 @@ class TaskValidatorBase:
         return None
 
 class TaskRunner:
-    """実行ロジッククラス"""
+    """
+    タスク実行ロジッククラス
+    
+    各種スクリプト（Python, PowerShell, Batch, 実行ファイル）を
+    適切なインタープリタで実行し、結果をログに記録します。
+    """
     @staticmethod
     def execute(row, full_path_str):
+        """
+        タスクを実行し、結果をログに記録
+        
+        ファイルの拡張子に応じて適切な実行方法を選択します:
+        - .py: Pythonインタープリタで実行
+        - .ps1: PowerShellで実行
+        - .bat/.cmd: コマンドプロンプトで実行
+        - その他: 直接実行
+        
+        Args:
+            row (dict): タスク行データ（ProcessName, Arguments等を含む）
+            full_path_str (str): 実行ファイルの絶対パス
+        
+        Returns:
+            bool: 実行成功時True、失敗時False
+        
+        Note:
+            この関数はThreadPoolExecutor内で呼ばれるため、
+            同期実行でもメインループはブロックされません。
+        """
         name = row['ProcessName']
         args = row.get('Arguments', '')
         
@@ -275,12 +511,51 @@ class TaskRunner:
             return False
 
 class Scheduler(TaskValidatorBase):
-    """メインスケジューラクラス"""
+    """
+    メインスケジューラクラス
+    
+    CSVファイルを定期的に監視し、登録されたタスクを適切なタイミングで
+    実行します。ThreadPoolExecutorを使用した並列実行に対応し、
+    実行結果をCSVファイルに書き戻します。
+    
+    Attributes:
+        executor (ThreadPoolExecutor): タスク実行用のスレッドプール
+        last_run_cache (dict): CSV書き込み失敗時のフォールバック用キャッシュ
+    
+    Inherits:
+        TaskValidatorBase: タスク検証機能を継承
+    """
     def __init__(self):
+        """
+        スケジューラを初期化
+        
+        最大5ワーカーのスレッドプールと、実行時刻キャッシュを準備します。
+        """
         self.executor = ThreadPoolExecutor(max_workers=5)
         self.last_run_cache = {}  # {ProcessName: LastRunTime_str}
 
     def process_tasks(self):
+        """
+        タスク処理のメインロジック
+        
+        CSVファイルを読み込み、各タスクの検証・実行判定を行い、
+        実行すべきタスクをスレッドプールに投入します。
+        実行後はLastRunTimeを更新してCSVに書き戻します。
+        
+        処理フロー:
+            1. CSVファイル読み込み
+            2. CSV構造検証
+            3. 各行のデータ検証
+            4. Enabledフラグチェック
+            5. ファイル存在確認
+            6. 実行タイミング判定
+            7. タスク実行（非同期）
+            8. LastRunTime更新
+            9. CSV書き戻し
+        
+        Note:
+            CSV書き込みに失敗した場合、last_run_cacheに状態を保持します。
+        """
         if not CSV_PATH.exists():
             logger.error(f"CSV file not found: {CSV_PATH}")
             return
@@ -354,6 +629,19 @@ class Scheduler(TaskValidatorBase):
             logger.error(f"Scheduler processing error: {e}")
 
     def _update_csv(self, fieldnames, rows):
+        """
+        CSVファイルを更新（リトライ機構付き）
+        
+        一時ファイルに書き込んでから、os.replaceで原子的に置換します。
+        Windowsのファイルロック問題に対応するため、失敗時はリトライします。
+        
+        Args:
+            fieldnames (list): CSVヘッダー列リスト
+            rows (list): タスク行データのリスト
+        
+        Note:
+            最大RETRY_COUNT回までリトライし、失敗した場合は一時ファイルを削除します。
+        """
         temp_path = CSV_PATH.with_suffix('.tmp')
         try:
             with open(temp_path, mode='w', encoding='utf-8-sig', newline='') as f:
@@ -385,12 +673,32 @@ class Scheduler(TaskValidatorBase):
                     pass
 
     def run_loop(self):
+        """
+        スケジューラのメインループ
+        
+        CHECK_INTERVAL秒ごとにprocess_tasks()を呼び出し、
+        タスクの実行判定と実行を継続的に行います。
+        
+        Note:
+            このメソッドは無限ループです。終了するには外部からプロセスを停止してください。
+        """
         logger.info(f"Scheduler started. Interval: {CHECK_INTERVAL}s")
         while True:
             self.process_tasks()
             time.sleep(CHECK_INTERVAL)
 
 def main():
+    """
+    エントリポイント関数
+    
+    コマンドライン引数を解析し、以下のモードで動作します:
+    - 通常モード: スケジューラを常駐起動
+    - --once: タスクを1回だけ実行して終了
+    - --install: Windowsスタートアップに登録
+    - --uninstall: Windowsスタートアップから削除
+    
+    多重起動防止機構により、既に起動中の場合は新しいプロセスが自動終了します。
+    """
     parser = argparse.ArgumentParser(description="Python Task Scheduler")
     parser.add_argument("--once", action="store_true", help="Run tasks once and exit (no loop)")
     parser.add_argument("--install", action="store_true", help="Register script to Windows Startup")
