@@ -52,6 +52,8 @@ import argparse
 import datetime
 import pathlib
 import shlex
+from dataclasses import dataclass, asdict
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
 # --- 設定定数 ---
@@ -73,6 +75,259 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Task:
+    """
+    タスク情報を保持するデータクラス
+    
+    CSVファイルから読み込んだタスク定義をカプセル化し、
+    実行判定、ファイル検証、実行などのビジネスロジックを提供します。
+    
+    Attributes:
+        ProcessName (str): タスク識別名
+        Enabled (str): 有効フラグ ("true"/"false", "TRUE"/"FALSE")
+        ExecutablePath (str): 実行ファイルのパス（相対 or 絶対）
+        Arguments (str): コマンドライン引数
+        Frequency (str): 実行間隔（分単位、文字列）
+        LastRunTime (str): 最終実行時刻（ISO形式文字列）
+    """
+    ProcessName: str
+    Enabled: str
+    ExecutablePath: str
+    Arguments: str = ""
+    Frequency: str = "0"
+    LastRunTime: str = ""
+    
+    @classmethod
+    def from_csv_row(cls, row: dict) -> 'Task':
+        """
+        CSVの行（dict）からTaskインスタンスを生成
+        
+        Args:
+            row (dict): csv.DictReaderから取得した行データ
+        
+        Returns:
+            Task: Taskインスタンス
+        """
+        return cls(
+            ProcessName=row.get('ProcessName', 'Unknown'),
+            Enabled=row.get('Enabled', 'false'),
+            ExecutablePath=row.get('ExecutablePath', ''),
+            Arguments=row.get('Arguments', ''),
+            Frequency=row.get('Frequency', '0'),
+            LastRunTime=row.get('LastRunTime', '')
+        )
+    
+    def to_csv_row(self) -> dict:
+        """
+        TaskインスタンスをCSV行（dict）に変換
+        
+        Returns:
+            dict: CSVに書き込める形式の辞書
+        """
+        return asdict(self)
+    
+    def is_enabled(self) -> bool:
+        """
+        タスクが有効かどうか判定
+        
+        Returns:
+            bool: 有効な場合True
+        """
+        return self.Enabled.lower() in ('true', '1', 'yes')
+    
+    def get_frequency_minutes(self) -> int:
+        """
+        実行頻度を分単位の整数で取得
+        
+        Returns:
+            int: 実行間隔（分）
+        
+        Raises:
+            ValueError: Frequencyが数値でない場合
+        """
+        return int(self.Frequency)
+    
+    def get_absolute_path(self) -> pathlib.Path:
+        """
+        実行ファイルの絶対パスを取得
+        
+        相対パスの場合はプロジェクトルート（BASE_DIR）からの
+        絶対パスに変換します。
+        
+        Returns:
+            Path: 絶対パスのPathオブジェクト
+        """
+        f_path = pathlib.Path(self.ExecutablePath)
+        if not f_path.is_absolute():
+            f_path = BASE_DIR / f_path
+        return f_path
+    
+    def file_exists(self) -> bool:
+        """
+        実行ファイルが存在するか確認
+        
+        Returns:
+            bool: ファイルが存在する場合True
+        """
+        return self.get_absolute_path().exists()
+    
+    def validate(self) -> tuple[bool, str]:
+        """
+        タスクデータの整合性を検証
+        
+        ExecutablePathの存在確認とFrequencyの数値型チェックを行います。
+        
+        Returns:
+            tuple: (is_valid: bool, message: str)
+                - is_valid: 検証が成功した場合True
+                - message: エラーメッセージ（成功時は空文字列）
+        """
+        if not self.ExecutablePath:
+            return False, f"[{self.ProcessName}] Missing ExecutablePath."
+        
+        try:
+            self.get_frequency_minutes()
+        except ValueError:
+            return False, f"[{self.ProcessName}] Frequency is not a valid number."
+        
+        if not self.file_exists():
+            return False, f"[{self.ProcessName}] File not found: {self.get_absolute_path()}"
+        
+        return True, ""
+    
+    def should_run(self, current_time: datetime.datetime) -> tuple[bool, str]:
+        """
+        タスクを実行すべきか判定
+        
+        Enabledフラグ、実行頻度、最終実行時刻から、
+        現在のタイミングでタスクを実行すべきか判定します。
+        
+        Args:
+            current_time (datetime): 現在時刻
+        
+        Returns:
+            tuple: (should_run: bool, reason: str)
+                - should_run: 実行すべき場合True
+                - reason: 判定理由（"First Run", "Scheduled", "Disabled", etc.）
+        """
+        if not self.is_enabled():
+            return False, "Disabled"
+        
+        freq_min = self.get_frequency_minutes()
+        
+        if not self.LastRunTime:
+            return True, "First Run"
+        
+        try:
+            last_run = self._parse_last_run_time(self.LastRunTime)
+            if last_run is None:
+                return True, "Invalid Date Reset"
+            
+            next_run = last_run + datetime.timedelta(minutes=freq_min)
+            if current_time >= next_run:
+                return True, "Scheduled"
+            else:
+                return False, f"Next run: {next_run}"
+        except Exception as e:
+            logger.warning(f"[{self.ProcessName}] Date parsing error: {e}")
+            return True, "Invalid Date Reset"
+    
+    def _parse_last_run_time(self, time_str: str) -> Optional[datetime.datetime]:
+        """
+        複数の日付フォーマットに対応してパース
+        
+        対応フォーマット:
+        - YYYY-MM-DD HH:MM:SS (ISO形式)
+        - YYYY/M/D HH:MM (スラッシュ区切り、秒なし)
+        - YYYY-MM-DD HH:MM (ハイフン区切り、秒なし)
+        
+        Args:
+            time_str (str): 日付文字列
+        
+        Returns:
+            datetime.datetime or None: パース成功時はdatetimeオブジェクト、失敗時はNone
+        """
+        formats = [
+            "%Y-%m-%d %H:%M:%S",  # 2026-06-22 08:57:09
+            "%Y/%m/%d %H:%M",     # 2026/1/29 11:47
+            "%Y-%m-%d %H:%M",     # 2026-06-22 08:57
+            "%Y/%m/%d %H:%M:%S",  # 2026/1/29 11:47:00
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(time_str.strip(), fmt)
+            except ValueError:
+                continue
+        
+        logger.warning(f"[{self.ProcessName}] Unsupported date format: '{time_str}'")
+        return None
+    
+    def execute(self) -> bool:
+        """
+        タスクを実行し、結果をログに記録
+        
+        ファイルの拡張子に応じて適切な実行方法を選択します:
+        - .py: Pythonインタープリタで実行
+        - .ps1: PowerShellで実行
+        - .bat/.cmd: コマンドプロンプトで実行
+        - その他: 直接実行
+        
+        Returns:
+            bool: 実行成功時True、失敗時False
+        
+        Note:
+            この関数はThreadPoolExecutor内で呼ばれるため、
+            同期実行でもメインループはブロックされません。
+        """
+        full_path = self.get_absolute_path()
+        suffix = full_path.suffix.lower()
+        cmd = []
+
+        if suffix == '.ps1':
+            cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(full_path)]
+        elif suffix == '.py':
+            cmd = [sys.executable, str(full_path)]
+        elif suffix in ['.bat', '.cmd']:
+            cmd = ["cmd.exe", "/c", str(full_path)]
+        else:
+            cmd = [str(full_path)]
+
+        if self.Arguments:
+            cmd.extend(shlex.split(self.Arguments))
+
+        logger.info(f"[{self.ProcessName}] Starting execution...")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            
+            output_msg = ""
+            if result.stdout:
+                output_msg += f"\n[STDOUT]\n{result.stdout.strip()}"
+            if result.stderr:
+                output_msg += f"\n[STDERR]\n{result.stderr.strip()}"
+
+            if result.returncode == 0:
+                logger.info(f"[{self.ProcessName}] Completed successfully.{output_msg}")
+                return True
+            else:
+                logger.warning(f"[{self.ProcessName}] Failed (Code: {result.returncode}).{output_msg}")
+                return False
+        except Exception as e:
+            logger.error(f"[{self.ProcessName}] Exception: {e}")
+            return False
+    
+    def update_last_run_time(self, run_time: datetime.datetime) -> None:
+        """
+        最終実行時刻を更新
+        
+        Args:
+            run_time (datetime): 実行時刻
+        """
+        self.LastRunTime = run_time.strftime("%Y-%m-%d %H:%M:%S")
+
 
 class SingleInstanceLock:
     """
@@ -277,37 +532,20 @@ class StartupManager:
         else:
             print("Info: Startup script does not exist.")
 
-class TaskValidatorBase:
+
+class CSVValidator:
     """
-    タスクデータの検証・判定を行う基底クラス
+    CSVファイル構造の検証を行うクラス
     
-    CSVから読み込んだタスクデータの整合性チェック、ファイル存在確認、
-    実行タイミング判定などの検証ロジックを提供します。
+    タスクCSVファイルが必要なヘッダー列を持っているか検証します。
     
     Attributes:
         REQUIRED_HEADERS (set): CSV必須ヘッダー列の集合
     """
     REQUIRED_HEADERS = {'Enabled', 'ProcessName', 'ExecutablePath', 'Frequency'}
 
-    def get_absolute_path(self, exec_path):
-        """
-        実行ファイルの絶対パスを取得
-        
-        相対パスの場合はプロジェクトルート（BASE_DIR）からの
-        絶対パスに変換します。
-        
-        Args:
-            exec_path (str): 実行ファイルパス
-        
-        Returns:
-            Path: 絶対パスのPathオブジェクト
-        """
-        f_path = pathlib.Path(exec_path)
-        if not f_path.is_absolute():
-            f_path = BASE_DIR / f_path
-        return f_path
-
-    def validate_csv_structure(self, fieldnames):
+    @staticmethod
+    def validate_csv_structure(fieldnames: list) -> tuple[bool, str]:
         """
         CSVファイルの構造を検証
         
@@ -322,195 +560,13 @@ class TaskValidatorBase:
                 - is_valid: 検証が成功した場合True
                 - message: エラーメッセージ（成功時は空文字列）
         """
-        if not self.REQUIRED_HEADERS.issubset(fieldnames):
-            missing = self.REQUIRED_HEADERS - set(fieldnames)
+        if not CSVValidator.REQUIRED_HEADERS.issubset(fieldnames):
+            missing = CSVValidator.REQUIRED_HEADERS - set(fieldnames)
             return False, f"Missing headers: {missing}"
         return True, ""
 
-    def validate_row_data(self, row):
-        """
-        タスク行データの検証
-        
-        ExecutablePathの存在確認とFrequencyの数値型チェックを行います。
-        
-        Args:
-            row (dict): CSVの1行分のデータ
-        
-        Returns:
-            tuple: (is_valid: bool, message: str)
-                - is_valid: 検証が成功した場合True
-                - message: エラーメッセージ（成功時は空文字列）
-        """
-        name = row.get('ProcessName', 'Unknown')
-        if not row.get('ExecutablePath'):
-            return False, f"[{name}] Missing ExecutablePath."
-        try:
-            int(row.get('Frequency', 0))
-        except ValueError:
-            return False, f"[{name}] Frequency is not a valid number."
-        return True, ""
 
-    def check_file_existence(self, exec_path):
-        """
-        実行ファイルの存在確認
-        
-        指定されたパスのファイルが実際に存在するかチェックします。
-        相対パスの場合は絶対パスに変換してから確認します。
-        
-        Args:
-            exec_path (str): 実行ファイルパス
-        
-        Returns:
-            tuple: (exists: bool, path_or_message: str)
-                - exists: ファイルが存在する場合True
-                - path_or_message: 存在する場合は絶対パス、存在しない場合はエラーメッセージ
-        """
-        f_path = self.get_absolute_path(exec_path)
-        if not f_path.exists():
-            return False, f"File not found: {f_path}"
-        return True, str(f_path)
-
-    def should_run_task(self, row, current_time):
-        """
-        タスクを実行すべきか判定
-        
-        Enabledフラグ、実行頻度、最終実行時刻から、
-        現在のタイミングでタスクを実行すべきか判定します。
-        
-        Args:
-            row (dict): タスク行データ
-            current_time (datetime): 現在時刻
-        
-        Returns:
-            tuple: (should_run: bool, reason: str)
-                - should_run: 実行すべき場合True
-                - reason: 判定理由（"First Run", "Scheduled", "Disabled", etc.）
-        """
-        enabled = row.get('Enabled', '').lower() in ('true', '1', 'yes')
-        if not enabled:
-            return False, "Disabled"
-
-        freq_min = int(row['Frequency'])
-        last_run_str = row.get('LastRunTime', '')
-
-        if not last_run_str:
-            return True, "First Run"
-
-        try:
-            last_run = self._parse_last_run_time(last_run_str)
-            if last_run is None:
-                return True, "Invalid Date Reset"
-            
-            next_run = last_run + datetime.timedelta(minutes=freq_min)
-            if current_time >= next_run:
-                return True, "Scheduled"
-            else:
-                return False, f"Next run: {next_run}"
-        except Exception as e:
-            logger.warning(f"Date parsing error: {e}")
-            return True, "Invalid Date Reset"
-
-    def _parse_last_run_time(self, time_str):
-        """
-        複数の日付フォーマットに対応してパース
-        
-        対応フォーマット:
-        - YYYY-MM-DD HH:MM:SS (ISO形式)
-        - YYYY/M/D HH:MM (スラッシュ区切り、秒なし)
-        - YYYY-MM-DD HH:MM (ハイフン区切り、秒なし)
-        
-        Args:
-            time_str (str): 日付文字列
-        
-        Returns:
-            datetime.datetime or None: パース成功時はdatetimeオブジェクト、失敗時はNone
-        """
-        formats = [
-            "%Y-%m-%d %H:%M:%S",  # 2026-06-22 08:57:09
-            "%Y/%m/%d %H:%M",     # 2026/1/29 11:47
-            "%Y-%m-%d %H:%M",     # 2026-06-22 08:57
-            "%Y/%m/%d %H:%M:%S",  # 2026/1/29 11:47:00
-        ]
-        
-        for fmt in formats:
-            try:
-                return datetime.datetime.strptime(time_str.strip(), fmt)
-            except ValueError:
-                continue
-        
-        logger.warning(f"Unsupported date format: '{time_str}'. Supported formats: {formats}")
-        return None
-
-class TaskRunner:
-    """
-    タスク実行ロジッククラス
-    
-    各種スクリプト（Python, PowerShell, Batch, 実行ファイル）を
-    適切なインタープリタで実行し、結果をログに記録します。
-    """
-    @staticmethod
-    def execute(row, full_path_str):
-        """
-        タスクを実行し、結果をログに記録
-        
-        ファイルの拡張子に応じて適切な実行方法を選択します:
-        - .py: Pythonインタープリタで実行
-        - .ps1: PowerShellで実行
-        - .bat/.cmd: コマンドプロンプトで実行
-        - その他: 直接実行
-        
-        Args:
-            row (dict): タスク行データ（ProcessName, Arguments等を含む）
-            full_path_str (str): 実行ファイルの絶対パス
-        
-        Returns:
-            bool: 実行成功時True、失敗時False
-        
-        Note:
-            この関数はThreadPoolExecutor内で呼ばれるため、
-            同期実行でもメインループはブロックされません。
-        """
-        name = row['ProcessName']
-        args = row.get('Arguments', '')
-        
-        f_path = pathlib.Path(full_path_str)
-        suffix = f_path.suffix.lower()
-        cmd = []
-
-        if suffix == '.ps1':
-            cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", full_path_str]
-        elif suffix == '.py':
-            cmd = [sys.executable, full_path_str]
-        elif suffix in ['.bat', '.cmd']:
-            cmd = ["cmd.exe", "/c", full_path_str]
-        else:
-            cmd = [full_path_str]
-
-        if args:
-            cmd.extend(shlex.split(args))
-
-        logger.info(f"[{name}] Starting execution...")
-        try:
-            # subprocess.run は同期実行だが、ThreadPoolExecutor内で呼ばれるためメインループをブロックしない
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            
-            output_msg = ""
-            if result.stdout:
-                output_msg += f"\n[STDOUT]\n{result.stdout.strip()}"
-            if result.stderr:
-                output_msg += f"\n[STDERR]\n{result.stderr.strip()}"
-
-            if result.returncode == 0:
-                logger.info(f"[{name}] Completed successfully.{output_msg}")
-                return True
-            else:
-                logger.warning(f"[{name}] Failed (Code: {result.returncode}).{output_msg}")
-                return False
-        except Exception as e:
-            logger.error(f"[{name}] Exception: {e}")
-            return False
-
-class Scheduler(TaskValidatorBase):
+class Scheduler:
     """
     メインスケジューラクラス
     
@@ -521,9 +577,6 @@ class Scheduler(TaskValidatorBase):
     Attributes:
         executor (ThreadPoolExecutor): タスク実行用のスレッドプール
         last_run_cache (dict): CSV書き込み失敗時のフォールバック用キャッシュ
-    
-    Inherits:
-        TaskValidatorBase: タスク検証機能を継承
     """
     def __init__(self):
         """
@@ -545,9 +598,9 @@ class Scheduler(TaskValidatorBase):
         処理フロー:
             1. CSVファイル読み込み
             2. CSV構造検証
-            3. 各行のデータ検証
-            4. Enabledフラグチェック
-            5. ファイル存在確認
+            3. Taskオブジェクトに変換
+            4. キャッシュからLastRunTime復元（必要な場合）
+            5. タスク検証（Enabled、ファイル存在等）
             6. 実行タイミング判定
             7. タスク実行（非同期）
             8. LastRunTime更新
@@ -562,73 +615,65 @@ class Scheduler(TaskValidatorBase):
 
         updated = False
         now = datetime.datetime.now()
-        new_rows = []
+        tasks = []
 
         try:
             with open(CSV_PATH, mode='r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 fieldnames = reader.fieldnames or []
                 
-                is_valid_csv, msg = self.validate_csv_structure(fieldnames)
+                is_valid_csv, msg = CSVValidator.validate_csv_structure(fieldnames)
                 if not is_valid_csv:
                     logger.error(msg)
                     return
 
                 if 'LastRunTime' not in fieldnames:
-                    fieldnames.append('LastRunTime')
+                    fieldnames = list(fieldnames) + ['LastRunTime']
                 
                 rows = list(reader)
 
             for row in rows:
-                p_name = row.get('ProcessName')
+                task = Task.from_csv_row(row)
                 
                 # In-memory cache fallback: If CSV write failed previously, use cached time
-                if p_name in self.last_run_cache:
-                    cached_time = self.last_run_cache[p_name]
-                    # Only use cache if it looks valid and potentially newer (simple string replacement here)
-                    if cached_time: 
-                        row['LastRunTime'] = cached_time
+                if task.ProcessName in self.last_run_cache:
+                    cached_time = self.last_run_cache[task.ProcessName]
+                    if cached_time:
+                        task.LastRunTime = cached_time
 
-                is_valid_row, msg = self.validate_row_data(row)
-                if not is_valid_row:
+                # Validation
+                is_valid, msg = task.validate()
+                if not is_valid:
                     logger.warning(msg)
-                    new_rows.append(row)
+                    tasks.append(task)
                     continue
 
-                # Check Enabled status first to avoid checking file existence for disabled tasks
-                enabled = row.get('Enabled', '').lower() in ('true', '1', 'yes')
-                if not enabled:
-                    logger.debug(f"[{row['ProcessName']}] Disabled. Skipping.")
-                    new_rows.append(row)
+                # Check Enabled status
+                if not task.is_enabled():
+                    logger.debug(f"[{task.ProcessName}] Disabled. Skipping.")
+                    tasks.append(task)
                     continue
 
-                is_file_exist, path_or_msg = self.check_file_existence(row['ExecutablePath'])
-                if not is_file_exist:
-                    logger.error(f"[{row['ProcessName']}] {path_or_msg}")
-                    new_rows.append(row)
-                    continue
-                
-                full_path = path_or_msg
-                should_run, reason = self.should_run_task(row, now)
+                # Check execution timing
+                should_run, reason = task.should_run(now)
                 
                 if should_run:
-                    logger.info(f"[{row['ProcessName']}] Triggered ({reason})")
-                    self.executor.submit(TaskRunner.execute, row, full_path)
+                    logger.info(f"[{task.ProcessName}] Triggered ({reason})")
+                    self.executor.submit(task.execute)
                     
-                    new_last_run = now.strftime("%Y-%m-%d %H:%M:%S")
-                    row['LastRunTime'] = new_last_run
-                    self.last_run_cache[p_name] = new_last_run  # Update cache
+                    task.update_last_run_time(now)
+                    self.last_run_cache[task.ProcessName] = task.LastRunTime
                     updated = True
                 
-                new_rows.append(row)
+                tasks.append(task)
 
             if updated:
-                self._update_csv(fieldnames, new_rows)
+                self._update_csv(fieldnames, tasks)
 
         except Exception as e:
             logger.error(f"Scheduler processing error: {e}")
 
-    def _update_csv(self, fieldnames, rows):
+    def _update_csv(self, fieldnames: list, tasks: list):
         """
         CSVファイルを更新（リトライ機構付き）
         
@@ -637,7 +682,7 @@ class Scheduler(TaskValidatorBase):
         
         Args:
             fieldnames (list): CSVヘッダー列リスト
-            rows (list): タスク行データのリスト
+            tasks (list[Task]): Taskオブジェクトのリスト
         
         Note:
             最大RETRY_COUNT回までリトライし、失敗した場合は一時ファイルを削除します。
@@ -647,7 +692,7 @@ class Scheduler(TaskValidatorBase):
             with open(temp_path, mode='w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                writer.writerows(rows)
+                writer.writerows([task.to_csv_row() for task in tasks])
             
             # Retry logic for file locking issues (WinError 5)
             for attempt in range(RETRY_COUNT):
