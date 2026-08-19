@@ -1,0 +1,6 @@
+ProcessName,Enabled,ExecutablePath,Arguments,Frequency,LastRunTime
+sample,FALSE,C:\Users\mypass,,5,
+app_clude,TRUE,.\tool\app_cloud.ps1,,1380,2026-07-08 10:13:57
+c_lang_svnup,TRUE,.\tool\Code-c.bat,,10,2026-07-08 13:44:05
+CleanPyCache,TRUE,.\tool\clean_pycache.py,,1300,2026-07-08 10:13:57
+doc_svn,FALSE,.\tool\doc-svn.bat,,60,2026-01-29 11:47:00

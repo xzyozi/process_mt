@@ -3,6 +3,7 @@
 /PyTaskScheduler.bat
 /task_log.log
 /task_log.txt
+/process_schedule.csv
 
 # Python
 __pycache__/
