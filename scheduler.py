@@ -291,7 +291,7 @@ class Task:
             cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(full_path)]
         elif suffix == '.py':
             cmd = [sys.executable, str(full_path)]
-        elif suffix in ['.bat', '.cmd']:
+        elif suffix in ['.bat', '.cmd', '.lnk']:
             cmd = ["cmd.exe", "/c", str(full_path)]
         else:
             cmd = [str(full_path)]
