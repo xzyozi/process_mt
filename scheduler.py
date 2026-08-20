@@ -61,7 +61,7 @@ BASE_DIR = pathlib.Path(__file__).parent.absolute()
 CSV_PATH = BASE_DIR / "process_schedule.csv"
 LOG_PATH = BASE_DIR / "task_log.log"
 LOCK_PORT = 62001
-CHECK_INTERVAL = 300 # miniute
+CHECK_INTERVAL = 300 # seconds
 APP_NAME = "PyTaskScheduler"  # スタートアップ登録名
 RETRY_COUNT = 5
 
@@ -291,7 +291,7 @@ class Task:
             cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(full_path)]
         elif suffix == '.py':
             cmd = [sys.executable, str(full_path)]
-        elif suffix in ['.bat', '.cmd']:
+        elif suffix in ['.bat', '.cmd', '.lnk']:
             cmd = ["cmd.exe", "/c", str(full_path)]
         else:
             cmd = [str(full_path)]
